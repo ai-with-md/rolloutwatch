@@ -66,6 +66,26 @@ The chance of any wrong call over the whole rollout stays at or below `alpha` (5
 - **Side by side** (the default): part of the traffic still goes to the old version, and you pass both versions' counts. This is the safer design, because both versions see the same days, the same users and the same kinds of requests.
 - **Against a fixed baseline**: everyone gets the new version, and you know the old pass rate well from history: `rw.QualityMonitor(drop=0.03, baseline=0.83)`, then `monitor.update(new_passed, new_total)`. Faster, but a shift in traffic can look like a change in quality.
 
+### From a raw request log
+
+Most teams have a log with one row per graded request rather than daily counts. `load_requests` reads it (CSV, JSON or JSON Lines), counts passes per day or hour for each version, and feeds the monitor:
+
+```python
+log = rw.load_requests("requests.csv", new="prompt-v2", old="prompt-v1")
+print(log.report())
+# Read 5864 requests into 21 periods (time from 'timestamp', version from 'version', outcome from 'judge_verdict').
+
+monitor = rw.QualityMonitor(drop=0.03)
+log.feed(monitor)
+print(monitor.report().splitlines()[-1])
+# The new version is reliably worse, first clear at check 7.
+```
+
+- Columns are found by common names: a time (`timestamp`, `date`, `created_at`, ...), a version (`version`, `variant`, `arm`, `group`, ...) and an outcome (`passed`, `success`, `verdict`, `status`, `error`, ...). Name them yourself when the guess is wrong, including nested JSON fields such as `metadata.variant`.
+- A numeric judge score works too: `score="judge_score", pass_threshold=0.7`.
+- Times can be ISO dates or timestamps, or epoch seconds or milliseconds. Requests are grouped by the date as written, so keep the whole log in one time zone.
+- Versions other than `new` and `old` are left out and counted in the report. With `baseline=True`, every row is taken as the new version and the version column is optional.
+
 ### Plan before you start
 
 How long until you know depends on your traffic, the size of the change and the design. `plan_rollout` simulates hundreds of rollouts with the same monitor:
@@ -94,6 +114,7 @@ rw.peeking_curve(max_checks=60)                     # the whole curve
 ```bash
 rolloutwatch check daily.csv                    # side by side
 rolloutwatch check daily.csv --baseline 0.83    # against a fixed baseline
+rolloutwatch check requests.csv --new prompt-v2 --old prompt-v1 -v   # a raw request log
 rolloutwatch plan --baseline 0.82 --change -0.04 --per-day 300
 rolloutwatch peeking --checks 30
 ```
@@ -109,7 +130,9 @@ Watching for a drop of 3.0% or more (side by side), chance of any wrong call 0.0
 The new version is reliably worse, first clear at date 2026-11-08.
 ```
 
-Try it on the simulated rollouts in [`examples/`](https://github.com/ai-with-md/rolloutwatch/tree/main/examples): a prompt change that is really four points worse, run side by side, and a model switch that changed nothing, checked against a baseline.
+For a raw request log, `check` counts the requests per day (or `--period hour`) first; add `--save-counts daily.csv` to keep the counts.
+
+Try it on the simulated rollouts in [`examples/`](https://github.com/ai-with-md/rolloutwatch/tree/main/examples): a prompt change that is really four points worse, run side by side (as daily counts and as the raw log of 5,864 graded requests behind them), and a model switch that changed nothing, checked against a baseline.
 
 ## How the numbers are checked
 
