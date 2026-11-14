@@ -7,7 +7,7 @@ import csv
 import sys
 from typing import List, Optional
 
-from . import WATCHING, QualityMonitor, load_requests, peeking_false_alarms, plan_rollout
+from . import WATCHING, QualityMonitor, ScoreMonitor, load_requests, peeking_false_alarms, plan_rollout
 
 
 def _int(row: dict, key: str, path: str, line: int) -> int:
@@ -17,12 +17,29 @@ def _int(row: dict, key: str, path: str, line: int) -> int:
         raise ValueError(f"{path}, line {line}: cannot read {key} {row.get(key)!r} as a count") from None
 
 
-def _is_counts_file(path: str) -> bool:
+def _file_kind(path: str) -> str:
+    """'counts', 'score summaries' or 'requests'."""
     if not path.lower().endswith(".csv"):
-        return False
+        return "requests"
     with open(path, newline="", encoding="utf-8-sig") as handle:
-        header = next(csv.reader(handle), [])
-    return {"new_passed", "new_total"} <= {c.strip().lower() for c in header}
+        header = {c.strip().lower() for c in next(csv.reader(handle), [])}
+    if {"new_passed", "new_total"} <= header:
+        return "counts"
+    if {"new_count", "new_mean", "new_sd"} <= header:
+        return "score summaries"
+    return "requests"
+
+
+def _monitor(args: argparse.Namespace, scores: bool):
+    if scores:
+        low, high = args.score_range
+        drop = args.drop if args.drop is not None else 0.05 * (high - low)
+        args.drop = drop
+        return ScoreMonitor(drop=drop, score_range=(low, high), alpha=args.alpha, baseline=args.baseline,
+                            min_samples=args.min_samples)
+    if args.drop is None:
+        args.drop = 0.03
+    return QualityMonitor(drop=args.drop, alpha=args.alpha, baseline=args.baseline, min_samples=args.min_samples)
 
 
 def _check_requests(args: argparse.Namespace) -> str:
@@ -36,27 +53,37 @@ def _check_requests(args: argparse.Namespace) -> str:
         outcome=args.outcome_column,
         score=args.score_column,
         pass_threshold=args.pass_threshold,
+        mean_scores=args.mean_score,
         period=args.period,
     )
     if args.verbose:
         print(log.report(), file=sys.stderr)
     if args.save_counts:
         log.to_csv(args.save_counts)
-    monitor = QualityMonitor(drop=args.drop, alpha=args.alpha, baseline=args.baseline, min_samples=args.min_samples)
+    monitor = _monitor(args, args.mean_score)
     log.feed(monitor)
     return _format(args, monitor, [b.period for b in log.batches], args.period)
 
 
-def _format(args: argparse.Namespace, monitor: QualityMonitor, labels: List[str], label_name: Optional[str]) -> str:
+def _format(args: argparse.Namespace, monitor, labels: List[str], label_name: Optional[str]) -> str:
+    scores = isinstance(monitor, ScoreMonitor)
     lines = []
     for name, reading in zip(labels, monitor.history):
-        lines.append(
-            f"  {name:>16}  new {reading.new_rate:6.1%}  vs {reading.old_rate:6.1%}  "
-            f"diff {reading.difference:+6.1%}  ({reading.low:+.1%} to {reading.high:+.1%})  {reading.status}"
-        )
+        if scores:
+            lines.append(
+                f"  {name:>16}  new {reading.new_mean:6.3f}  vs {reading.old_mean:6.3f}  "
+                f"diff {reading.difference:+6.3f}  ({reading.low:+.3f} to {reading.high:+.3f})  {reading.status}"
+            )
+        else:
+            lines.append(
+                f"  {name:>16}  new {reading.new_rate:6.1%}  vs {reading.old_rate:6.1%}  "
+                f"diff {reading.difference:+6.1%}  ({reading.low:+.1%} to {reading.high:+.1%})  {reading.status}"
+            )
+    what = f"a drop in the average score of {args.drop:g}" if scores else f"a drop of {args.drop:.1%}"
+    base = "" if args.baseline is None else format(args.baseline, "g" if scores else ".1%")
     header = (
-        f"Watching for a drop of {args.drop:.1%} or more "
-        f"({'against a baseline of ' + format(args.baseline, '.1%') if args.baseline is not None else 'side by side'}), "
+        f"Watching for {what} or more "
+        f"({'against a baseline of ' + base if args.baseline is not None else 'side by side'}), "
         f"chance of any wrong call {args.alpha:g}:"
     )
     last = monitor.report().splitlines()[-1]
@@ -66,9 +93,38 @@ def _format(args: argparse.Namespace, monitor: QualityMonitor, labels: List[str]
     return "\n".join([header] + lines + [last])
 
 
+def _check_score_summaries(args: argparse.Namespace) -> str:
+    with open(args.file, newline="", encoding="utf-8-sig") as handle:
+        rows = [{k.strip().lower(): v for k, v in r.items() if k} for r in csv.DictReader(handle)]
+    if not rows:
+        raise ValueError(f"{args.file} has no rows")
+    side_by_side = {"old_count", "old_mean", "old_sd"} <= set(rows[0])
+    if side_by_side == (args.baseline is not None):
+        raise ValueError(
+            "pass --baseline only when the file has no old_count, old_mean and old_sd columns"
+        )
+    label = next((c for c in ("period", "date", "day", "batch") if c in rows[0]), None)
+    monitor = _monitor(args, True)
+    labels = []
+    for line, row in enumerate(rows, start=2):
+        try:
+            values = [float(row[k]) for k in (("new_count", "new_mean", "new_sd", "old_count", "old_mean", "old_sd") if side_by_side else ("new_count", "new_mean", "new_sd"))]
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(f"{args.file}, line {line}: cannot read the counts, averages and standard deviations") from None
+        if side_by_side:
+            reading = monitor.update_summary(int(values[0]), values[1], values[2], int(values[3]), values[4], values[5])
+        else:
+            reading = monitor.update_summary(int(values[0]), values[1], values[2])
+        labels.append(row[label] if label else str(reading.check))
+    return _format(args, monitor, labels, label)
+
+
 def _cmd_check(args: argparse.Namespace) -> str:
-    if not _is_counts_file(args.file):
+    kind = _file_kind(args.file)
+    if kind == "requests":
         return _check_requests(args)
+    if kind == "score summaries":
+        return _check_score_summaries(args)
     with open(args.file, newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.DictReader(handle))
     if not rows:
@@ -83,7 +139,7 @@ def _cmd_check(args: argparse.Namespace) -> str:
         raise ValueError("the file has no old_passed and old_total columns: pass --baseline with the old pass rate")
     rows = [{k.strip().lower(): v for k, v in r.items() if k} for r in rows]
     label = next((c for c in ("period", "date", "day", "batch") if c in columns), None)
-    monitor = QualityMonitor(drop=args.drop, alpha=args.alpha, baseline=args.baseline, min_samples=args.min_samples)
+    monitor = _monitor(args, False)
     labels = []
     for line, row in enumerate(rows, start=2):
         new = (_int(row, "new_passed", args.file, line), _int(row, "new_total", args.file, line))
@@ -94,6 +150,8 @@ def _cmd_check(args: argparse.Namespace) -> str:
 
 
 def _cmd_plan(args: argparse.Namespace) -> str:
+    if args.drop is None:
+        args.drop = 0.03
     return plan_rollout(
         args.baseline, args.change, args.per_day, args.new_share, args.drop, args.days, args.alpha,
         fixed_baseline=args.fixed_baseline, simulations=args.simulations,
@@ -116,7 +174,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--drop", type=float, default=0.03, help="smallest drop worth catching (default 0.03)")
+        p.add_argument(
+            "--drop", type=float,
+            help="smallest drop worth catching (default 0.03 for pass rates, 5%% of the score range for scores)",
+        )
         p.add_argument("--alpha", type=float, default=0.05, help="chance of any wrong call (default 0.05)")
 
     p = sub.add_parser("check", help="read counts or a request log and say worse, not worse, or keep watching")
@@ -134,6 +195,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--score-column", help="request logs: numeric score column, used with --pass-threshold")
     p.add_argument("--pass-threshold", type=float, default=0.5, help="request logs: score needed to pass (default 0.5)")
     p.add_argument("--save-counts", help="request logs: also save the counts per period to this CSV")
+    p.add_argument("--mean-score", action="store_true", help="compare average scores instead of pass rates")
+    p.add_argument("--score-range", type=float, nargs=2, metavar=("LOW", "HIGH"), default=(0.0, 1.0),
+                   help="lowest and highest possible score, with --mean-score (default 0 1)")
     p.add_argument("-v", "--verbose", action="store_true", help="say which columns were used")
     p.add_argument("--baseline", type=float, help="old pass rate, when there is no old version running side by side")
     p.add_argument("--min-samples", type=int, default=50, help="results needed per version before any call")

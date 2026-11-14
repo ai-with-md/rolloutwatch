@@ -86,6 +86,21 @@ print(monitor.report().splitlines()[-1])
 - Times can be ISO dates or timestamps, or epoch seconds or milliseconds. Requests are grouped by the date as written, so keep the whole log in one time zone.
 - Versions other than `new` and `old` are left out and counted in the report. With `baseline=True`, every row is taken as the new version and the version column is optional.
 
+### Scores instead of pass or fail
+
+Many LLM judges score from 1 to 5, or from 0 to 1. Turning scores into pass or fail throws information away: a slide from 4.6 to 4.2 can hide inside "4 or above passes". `ScoreMonitor` watches the average score directly, with the same always-valid interval:
+
+```python
+monitor = rw.ScoreMonitor(drop=0.2, score_range=(1, 5))   # catch a drop of 0.2 points or more
+monitor.update(new_scores=[4, 5, 3, 4, 2], old_scores=[5, 4, 4, 5, 4])   # each batch's raw scores
+monitor.update_summary(150, 3.88, 0.95, 150, 4.10, 0.90)   # or count, average and standard deviation
+
+log = rw.load_requests("judge_scores.csv", new="prompt-v2", old="prompt-v1", mean_scores=True)
+log.feed(monitor)
+```
+
+The score range is needed so that the first few scores cannot make the interval falsely narrow: until enough results arrive, the spread is assumed to be as wide as a uniform spread over the range.
+
 ### Plan before you start
 
 How long until you know depends on your traffic, the size of the change and the design. `plan_rollout` simulates hundreds of rollouts with the same monitor:
@@ -115,6 +130,7 @@ rw.peeking_curve(max_checks=60)                     # the whole curve
 rolloutwatch check daily.csv                    # side by side
 rolloutwatch check daily.csv --baseline 0.83    # against a fixed baseline
 rolloutwatch check requests.csv --new prompt-v2 --old prompt-v1 -v   # a raw request log
+rolloutwatch check judge_scores.csv --new prompt-v2 --old prompt-v1 --mean-score --score-range 1 5
 rolloutwatch plan --baseline 0.82 --change -0.04 --per-day 300
 rolloutwatch peeking --checks 30
 ```
@@ -132,7 +148,7 @@ The new version is reliably worse, first clear at date 2026-11-08.
 
 For a raw request log, `check` counts the requests per day (or `--period hour`) first; add `--save-counts daily.csv` to keep the counts.
 
-Try it on the simulated rollouts in [`examples/`](https://github.com/ai-with-md/rolloutwatch/tree/main/examples): a prompt change that is really four points worse, run side by side (as daily counts and as the raw log of 5,864 graded requests behind them), and a model switch that changed nothing, checked against a baseline.
+Try it on the simulated rollouts in [`examples/`](https://github.com/ai-with-md/rolloutwatch/tree/main/examples): a prompt change that is really four points worse, run side by side (as daily counts and as the raw log of 5,864 graded requests behind them), a model switch that changed nothing, checked against a baseline, and two weeks of 1 to 5 judge scores where the new prompt is 0.23 points worse, caught on day six.
 
 ## How the numbers are checked
 
@@ -146,6 +162,9 @@ The test suite simulates hundreds of rollouts with a known truth and checks the 
 | Fixed baseline, no real change: false "worse" calls | 0.5% |
 | Small batches of 15 a day: false "worse" calls | 1.0% |
 | A real 6 point drop caught within 60 days | 100% |
+| Scores 1 to 5: the interval holds on every day at once | 98.3% |
+| Scores 1 to 5, no real change, 60 daily checks: false "worse" calls | 0.3% |
+| Scores 1 to 5, a real 0.23 point drop: caught / wrongly cleared | 100% / 0% |
 
 The monitor is conservative: it promises 5% and in practice makes fewer wrong calls, at the cost of answering a little later than a method that only had to work for one look. See [`tests/test_simulation.py`](https://github.com/ai-with-md/rolloutwatch/blob/main/tests/test_simulation.py).
 
@@ -167,7 +186,7 @@ where t is the mixing scale, set to the smallest drop worth catching. The always
 
 ## Limits
 
-- Pass/fail scores only for now. Scores on a scale (1 to 5, or 0 to 1) are a likely next step.
+- Rollout planning (`plan_rollout`) and the calculator cover pass rates; for scores, the monitor works but planning is not built yet.
 - Results must be independent. If one user sends many requests, or retries are graded separately, group them first.
 - The grader must stay the same during the rollout. A new judge prompt or a new judge model changes the scores of both versions.
 

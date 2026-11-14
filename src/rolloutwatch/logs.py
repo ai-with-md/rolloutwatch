@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -136,6 +137,25 @@ class Batch:
     old_total: Optional[int]
 
 
+@dataclass(frozen=True)
+class ScoreBatch:
+    period: str
+    new_count: int
+    new_mean: float
+    new_sd: float
+    old_count: Optional[int]
+    old_mean: Optional[float]
+    old_sd: Optional[float]
+
+
+def _summary(n: float, total: float, squares: float):
+    if n == 0:
+        return 0, 0.0, 0.0
+    mean = total / n
+    sd = math.sqrt(max(0.0, (squares - n * mean * mean) / (n - 1))) if n > 1 else 0.0
+    return int(n), mean, sd
+
+
 @dataclass
 class RequestLog:
     """Requests counted per period, ready to feed to a QualityMonitor."""
@@ -155,13 +175,28 @@ class RequestLog:
     def feed(self, monitor) -> None:
         """Run every period through the monitor, in time order."""
         for b in self.batches:
-            if b.old_total is None:
+            if isinstance(b, ScoreBatch):
+                if b.old_count is None:
+                    monitor.update_summary(b.new_count, b.new_mean, b.new_sd)
+                else:
+                    monitor.update_summary(b.new_count, b.new_mean, b.new_sd, b.old_count, b.old_mean, b.old_sd)
+            elif b.old_total is None:
                 monitor.update(b.new_passed, b.new_total)
             else:
                 monitor.update(b.new_passed, b.new_total, b.old_passed, b.old_total)
 
     def to_csv(self, path) -> None:
-        """Save the counts, in the format ``rolloutwatch check`` reads."""
+        """Save the counts (or score summaries), in the format ``rolloutwatch check`` reads."""
+        if self.batches and isinstance(self.batches[0], ScoreBatch):
+            fields = ["period", "new_count", "new_mean", "new_sd"]
+            if self.batches[0].old_count is not None:
+                fields += ["old_count", "old_mean", "old_sd"]
+            with open(path, "w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                for b in self.batches:
+                    writer.writerow({k: getattr(b, k) for k in fields})
+            return
         with open(path, "w", newline="") as handle:
             fields = ["period", "new_passed", "new_total"]
             if self.batches and self.batches[0].old_total is not None:
@@ -186,6 +221,7 @@ def load_requests(
     outcome: Optional[str] = None,
     score: Optional[str] = None,
     pass_threshold: float = 0.5,
+    mean_scores: bool = False,
     period: str = "day",
 ) -> RequestLog:
     """Count graded requests per day or hour, for each version.
@@ -200,6 +236,8 @@ def load_requests(
         version, time, outcome: column names, if the automatic guess is wrong.
         score, pass_threshold: use a numeric score column instead of pass or
             fail; a request passes when its score is at least the threshold.
+        mean_scores: keep the scores as they are and summarise each period by
+            count, average and standard deviation, for a ScoreMonitor.
         period: "day" or "hour".
 
     Requests are grouped by the date (or hour) in their time column, as
@@ -227,8 +265,14 @@ def load_requests(
 
     time_col = pick(time, TIME_NAMES, "time")
     version_col = pick(version, VERSION_NAMES, "version", required=not baseline)
-    outcome_col = pick(outcome, OUTCOME_NAMES, "outcome", required=False)
-    score_col = pick(score, SCORE_NAMES, "score", required=False) if outcome_col is None else None
+    outcome_col = pick(outcome, OUTCOME_NAMES, "outcome", required=False) if not mean_scores else None
+    score_col = None
+    if outcome_col is None:
+        score_col = pick(score, SCORE_NAMES, "score", required=False)
+        if score_col is None:  # columns like judge_score or quality_score
+            score_col = next((c for c in columns if _norm(c).endswith("score")), None)
+        if score_col is None and mean_scores:
+            raise ValueError(f"{path}: found no score column; name it with the score option. Columns are: {', '.join(columns[:15])}")
     status_col = _find(columns, STATUS_NAMES) if outcome_col is None and score_col is None else None
     error_col = _find(columns, ERROR_NAMES) if outcome_col is None and score_col is None and status_col is None else None
     if not any([outcome_col, score_col, status_col, error_col]):
@@ -250,7 +294,7 @@ def load_requests(
             if label not in values:
                 raise ValueError(f"{path}: no requests from version {label!r}. Versions in the file: {', '.join(values[:10])}")
 
-    counts: Dict[str, List[int]] = {}
+    counts: Dict[str, List[float]] = {}
     skipped: Dict[str, int] = {}
     for i, row in enumerate(records, start=1):
         where = f"{path}, row {i}"
@@ -270,24 +314,42 @@ def load_requests(
                 continue
         stamp = _parse_time(row.get(time_col), where)
         key = stamp.strftime("%Y-%m-%d") if period == "day" else stamp.strftime("%Y-%m-%d %H:00")
+        if mean_scores:
+            try:
+                value = float(row.get(score_col))
+            except (TypeError, ValueError):
+                raise ValueError(f"{where}: cannot read score {row.get(score_col)!r} as a number") from None
+            slot = counts.setdefault(key, [0.0] * 6)
+            offset = 0 if arm == "new" else 3
+            slot[offset] += 1
+            slot[offset + 1] += value
+            slot[offset + 2] += value * value
+            continue
         passed = _outcome(row, outcome_col, score_col, pass_threshold, status_col, error_col, where)
         slot = counts.setdefault(key, [0, 0, 0, 0])
         offset = 0 if arm == "new" else 2
         slot[offset] += passed
         slot[offset + 1] += 1
 
-    batches: List[Batch] = []
-    carry = [0, 0, 0, 0]
+    batches: list = []
+    width = 6 if mean_scores else 4
+    new_n, old_n = (0, 3) if mean_scores else (1, 3)
+    carry = [0] * width
     for key in sorted(counts):
         carry = [a + b for a, b in zip(carry, counts[key])]
-        have_new = carry[1] > 0
-        have_old = baseline or carry[3] > 0
+        have_new = carry[new_n] > 0
+        have_old = baseline or carry[old_n] > 0
         if not batches and not (have_new and have_old):
             continue  # merge into the first period that has both versions
-        batches.append(
-            Batch(key, carry[0], carry[1], None if baseline else carry[2], None if baseline else carry[3])
-        )
-        carry = [0, 0, 0, 0]
+        if mean_scores:
+            new = _summary(*carry[:3])
+            old = (None, None, None) if baseline else _summary(*carry[3:])
+            batches.append(ScoreBatch(key, *new, *old))
+        else:
+            batches.append(
+                Batch(key, int(carry[0]), int(carry[1]), None if baseline else int(carry[2]), None if baseline else int(carry[3]))
+            )
+        carry = [0] * width
     if not batches:
         raise ValueError(f"{path}: no period has requests from both versions")
 
@@ -296,5 +358,5 @@ def load_requests(
         used["version"] = version_col
     for label, col in (("outcome", outcome_col), ("score", score_col), ("status", status_col), ("error", error_col)):
         if col:
-            used[label] = col if label != "score" else f"{col} >= {pass_threshold:g}"
+            used[label] = col if label != "score" or mean_scores else f"{col} >= {pass_threshold:g}"
     return RequestLog(batches, len(records), skipped, used)

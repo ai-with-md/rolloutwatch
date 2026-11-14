@@ -97,3 +97,33 @@ def test_days_before_both_versions_have_results_are_merged(tmp_path):
 def test_clear_errors(tmp_path, content, kwargs, message):
     with pytest.raises(ValueError, match=message):
         rw.load_requests(write(tmp_path, "log.csv", content), **kwargs)
+
+
+def test_scores_are_summarised_per_period(tmp_path):
+    path = write(tmp_path, "log.csv", "date,version,judge_score\n2026-11-02,new,4\n2026-11-02,new,2\n2026-11-02,old,5\n2026-11-03,new,3\n2026-11-03,old,4\n2026-11-03,old,2\n")
+    log = rw.load_requests(path, mean_scores=True)
+    first, second = log.batches
+    assert (first.new_count, first.new_mean, first.old_count, first.old_mean) == (2, 3.0, 1, 5.0)
+    assert first.new_sd == pytest.approx(2 ** 0.5)
+    assert (second.new_count, second.old_count, second.old_mean) == (1, 2, 3.0)
+    assert log.columns_used["score"] == "judge_score"
+
+
+def test_scored_log_gives_the_same_readings_as_its_summaries(tmp_path):
+    log = rw.load_requests("examples/judge_scores.csv", new="prompt-v2", old="prompt-v1", mean_scores=True)
+    direct = rw.ScoreMonitor(drop=0.2, score_range=(1, 5))
+    log.feed(direct)
+    saved = tmp_path / "summary.csv"
+    log.to_csv(saved)
+    again = rw.ScoreMonitor(drop=0.2, score_range=(1, 5))
+    for row in csv.DictReader(open(saved)):
+        again.update_summary(int(row["new_count"]), float(row["new_mean"]), float(row["new_sd"]),
+                             int(row["old_count"]), float(row["old_mean"]), float(row["old_sd"]))
+    assert [c.status for c in again.history] == [c.status for c in direct.history]
+    assert again.history[-1].difference == pytest.approx(direct.history[-1].difference)
+
+
+def test_mean_scores_needs_a_score_column(tmp_path):
+    path = write(tmp_path, "log.csv", "date,version,passed\n2026-11-02,new,1\n2026-11-02,old,1\n")
+    with pytest.raises(ValueError, match="no score column"):
+        rw.load_requests(path, mean_scores=True)

@@ -50,3 +50,27 @@ def test_cli_reads_request_logs_and_saves_counts(tmp_path, capsys):
 def test_cli_verbose_report(capsys):
     assert main(["check", "examples/requests.csv", "--new", "prompt-v2", "--old", "prompt-v1", "-v"]) == 0
     assert "Read 5864 requests into 21 periods" in capsys.readouterr().err
+
+
+def test_check_scored_request_log(capsys):
+    args = ["check", "examples/judge_scores.csv", "--new", "prompt-v2", "--old", "prompt-v1", "--mean-score", "--score-range", "1", "5"]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "a drop in the average score of 0.2 or more (side by side)" in out
+    assert "first clear at day 2026-11-07" in out
+
+
+def test_check_score_summary_file(tmp_path, capsys):
+    saved = tmp_path / "summary.csv"
+    base = ["check", "examples/judge_scores.csv", "--new", "prompt-v2", "--old", "prompt-v1", "--mean-score", "--score-range", "1", "5"]
+    assert main(base + ["--save-counts", str(saved)]) == 0
+    capsys.readouterr()
+    assert main(["check", str(saved), "--score-range", "1", "5"]) == 0
+    assert "first clear at period 2026-11-07" in capsys.readouterr().out
+
+
+def test_score_summary_with_baseline(tmp_path, capsys):
+    path = tmp_path / "summary.csv"
+    path.write_text("period,new_count,new_mean,new_sd\n1,500,3.7,0.9\n2,500,3.7,0.9\n")
+    assert main(["check", str(path), "--score-range", "1", "5", "--baseline", "4.1"]) == 0
+    assert "against a baseline of 4.1" in capsys.readouterr().out
