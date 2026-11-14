@@ -34,3 +34,19 @@ def test_plan_and_peeking(capsys):
     assert main(["peeking", "--checks", "10"]) == 0
     out = capsys.readouterr().out
     assert "worse" in out and "false alarm" in out
+
+
+def test_cli_reads_request_logs_and_saves_counts(tmp_path, capsys):
+    counts = tmp_path / "counts.csv"
+    args = ["check", "examples/requests.csv", "--new", "prompt-v2", "--old", "prompt-v1", "--save-counts", str(counts)]
+    assert main(args) == 0
+    from_log = capsys.readouterr().out
+    assert main(["check", str(counts)]) == 0
+    from_counts = capsys.readouterr().out
+    assert "first clear at day 2026-11-08" in from_log
+    assert from_log.splitlines()[-1].split(" at ")[0] == from_counts.splitlines()[-1].split(" at ")[0]
+
+
+def test_cli_verbose_report(capsys):
+    assert main(["check", "examples/requests.csv", "--new", "prompt-v2", "--old", "prompt-v1", "-v"]) == 0
+    assert "Read 5864 requests into 21 periods" in capsys.readouterr().err
