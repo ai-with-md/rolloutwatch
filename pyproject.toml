@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rolloutwatch"
+version = "0.1.0"
+description = "Did my prompt or model change make things worse? Watch LLM quality after a change, checking as often as you like without false alarms"
+readme = "README.md"
+license = "MIT"
+authors = [{name = "Meenal Asesh"}]
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["llm", "evaluation", "monitoring", "regression", "sequential testing", "always valid inference", "a/b testing", "prompt engineering"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+rolloutwatch = "rolloutwatch.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ai-with-md/rolloutwatch"
+Calculator = "https://ai-with-md.github.io/rolloutwatch/"
+Issues = "https://github.com/ai-with-md/rolloutwatch/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src"]
+addopts = "--doctest-modules"
