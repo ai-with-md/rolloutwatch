@@ -190,6 +190,15 @@ where t is the mixing scale, set to the smallest drop worth catching. The always
 - Results must be independent. If one user sends many requests, or retries are graded separately, group them first.
 - The grader must stay the same during the rollout. A new judge prompt or a new judge model changes the scores of both versions.
 
+## More tools
+
+Small, free tools for building and checking AI systems:
+
+- **[evalsize](https://github.com/ai-with-md/evalsize)**: how many eval examples you need before a difference between prompts or models means anything.
+- **[evalnoise](https://github.com/ai-with-md/evalnoise)**: where the noise in an eval score comes from (questions, judges, prompt wordings, reruns), and where to spend the next API calls.
+- **[costplan](https://github.com/ai-with-md/costplan)**: what an AI agent will cost and what budget cap to set, from a handful of pilot runs.
+- **[sturdytools](https://github.com/ai-with-md/sturdytools)**: retries, timeouts, rate limits and circuit breakers for the tools an AI agent calls.
+
 ## Development
 
 ```bash
